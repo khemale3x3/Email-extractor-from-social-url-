@@ -1,0 +1,131 @@
+import time
+import os
+import re
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from dotenv import load_dotenv
+
+# Function to extract emails from text (bio content)
+def extract_emails(text):
+    email_regex = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{1,}'
+    return re.findall(email_regex, text)
+
+# Setup Selenium WebDriver with optimized settings
+chrome_options = Options()
+chrome_options.add_argument("--disable-gpu")
+chrome_options.add_argument("--disable-software-rasterizer")
+chrome_options.add_argument("--disable-webgl")
+chrome_options.add_argument("--headless")  # Headless mode for running without opening browser window
+chrome_options.add_argument("--log-level=3")  # Suppresses unnecessary Chrome logs
+chrome_options.add_argument("--window-size=1920,1080")  # Ensures full page loading
+
+service = Service(ChromeDriverManager().install())
+driver = webdriver.Chrome(service=service, options=chrome_options)
+
+# Load Instagram credentials from .env file
+load_dotenv()
+INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME")
+INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD")
+
+# Read URLs from Excel file
+excel_file = r'\Downloads\\urls.xlsx'  # Replace with your file path
+data = pd.read_excel(excel_file)
+
+# Ensure the column containing URLs is named "URL"
+urls = data['URL']
+
+# Storage for extracted emails
+email_results = []
+
+# Track if it's the first login
+first_login = True
+
+# Output file to save progress
+output_file = 'emails_extracted.xlsx'
+
+# Check if previous progress exists
+if os.path.exists(output_file):
+    saved_data = pd.read_excel(output_file)
+    processed_urls = set(saved_data['URL'])
+    print(f"Resuming... {len(processed_urls)} URLs already processed.")
+else:
+    processed_urls = set()
+
+# Function to save to Excel with retry
+def save_to_excel_with_retry(data, output_file, retries=3, delay=2):
+    for attempt in range(retries):
+        try:
+            data.to_excel(output_file, index=False)
+            print(f"Saved progress to {output_file}")
+            break
+        except PermissionError:
+            if attempt < retries - 1:
+                print(f"Permission error, retrying... ({attempt + 1}/{retries})")
+                time.sleep(delay)
+            else:
+                print(f"Failed to save after {retries} attempts. Please check file permissions.")
+                raise  # Raise exception after retrying
+
+try:
+    # Visit each URL and perform login
+    for url in urls:
+        if url in processed_urls:
+            print(f"Skipping (already processed): {url}")
+            continue  # Skip URLs that are already processed
+
+        print(f"Visiting: {url}")
+        driver.get(url)
+
+        # Perform login if it's the first time or if not logged in
+        if first_login:
+            print("Logging into Instagram...")
+            WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.NAME, "username")))
+
+            # Login to Instagram
+            driver.find_element(By.NAME, "username").send_keys(INSTAGRAM_USERNAME)
+            driver.find_element(By.NAME, "password").send_keys(INSTAGRAM_PASSWORD)
+            driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
+
+            time.sleep(5)  # Wait for login to complete
+            print("Login completed.")
+            first_login = False  # Set flag to False after first login
+        else:
+            print("Logging in with previous session...")
+            time.sleep(5)  # Brief wait after login
+
+        # Wait for the page to fully load
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+        # Extract the bio content which may contain an email
+        try:
+            # Locate the bio content (adjust the selector based on the class you provided)
+            bio_element = driver.find_element(By.CSS_SELECTOR, "span._ap3a._aaco._aacu._aacx._aad7._aade")  # Updated selector
+            bio_text = bio_element.text.strip()
+
+            # Search for email within the bio text
+            extracted_emails = extract_emails(bio_text)
+
+            if extracted_emails:
+                email_results.append({'URL': url, 'Emails': ', '.join(extracted_emails)})
+            else:
+                email_results.append({'URL': url, 'Emails': 'No email found'})
+
+            print(f"Emails extracted for {url}: {', '.join(extracted_emails) if extracted_emails else 'No email found'}")
+
+        except Exception as e:
+            print(f"Error extracting email from {url}: {e}")
+            email_results.append({'URL': url, 'Emails': 'Error during extraction'})
+
+        # Save progress to Excel file after each URL to prevent data loss
+        save_to_excel_with_retry(pd.DataFrame(email_results), output_file)
+        
+finally:
+    driver.quit()
+
+print(f"Emails extracted and saved to {output_file}")
